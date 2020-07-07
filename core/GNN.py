@@ -140,10 +140,11 @@ class Memory(nn.Module):
 
         # memory blocks/slots
         self.memory_keys = nn.Parameter(
-            pow(1 / self.emb_size, 0.5) * torch.ones(self.mem_size, self.emb_size, dtype=torch.float).to(self.device),
+            pow(1 / self.emb_size, 0.5) * torch.rand(self.mem_size, self.emb_size, dtype=torch.float).to(self.device),
             requires_grad=True)
         self.memory_values = nn.Parameter(
-            pow(1 / self.emb_size, 0.5) * torch.ones(self.mem_size, self.second_size, dtype=torch.float).to(self.device),
+            pow(1 / self.emb_size, 0.5) * torch.rand(self.mem_size, self.second_size, dtype=torch.float).to(
+                self.device),
             requires_grad=True)
 
     def forward(self, embedding, embedding_global, metric="Cosine"):
@@ -164,16 +165,21 @@ class Memory(nn.Module):
         # 2. We update global value of memory, where similarity_kv greater than threshold.
         score = torch.where(torch.ge(similarity_kv, self.thresh), similarity_kv,
                             torch.zeros_like(similarity_kv).to(self.device))  # [t_task, n_way*k_shot]
+        score = nn.functional.normalize(score, p=1, dim=-1)
         memory_values_updated = nn.functional.normalize(
-            torch.mean(self.q_k * self.memory_values + (1 - self.q_k) * score.unsqueeze(-1) * norm_emb_glo.unsqueeze(-2),
-                       [0, 1]), p=2, dim=-1)
+            torch.mean(
+                self.q_v * self.memory_values + (1 - self.q_v) * score.unsqueeze(-1) * norm_emb_glo.unsqueeze(-2),
+                [0, 1]), p=2, dim=-1)
 
         # for value->key
         # 3. calculate distance and score between memory_key and embedding
         similarity_vk = compute_similarity(norm_emb_glo, self.memory_values, metric=metric)
         # 4. find max similarity_vk, update the corresponding keys with support embedding
-        score = torch.zeros(similarity_vk.shape).to(self.device).scatter(-1, torch.argmax(similarity_vk, -1).
-                                                                         unsqueeze(-1), 1.0)
+        # score = torch.zeros(similarity_vk.shape).to(self.device).scatter(-1, torch.argmax(similarity_vk, -1).
+        #                                                                  unsqueeze(-1), 1.0)
+        score = torch.where(torch.ge(similarity_vk, self.thresh), similarity_vk,
+                            torch.zeros_like(similarity_vk).to(self.device))  # [t_task, n_way*k_shot]
+        score = nn.functional.normalize(score, p=1, dim=-1)
         memory_keys_updated = nn.functional.normalize(
             torch.mean(self.q_k * self.memory_keys + (1 - self.q_k) * score.unsqueeze(-1) * norm_emb.unsqueeze(-2),
                        [0, 1]), p=2, dim=-1)
@@ -186,6 +192,9 @@ class Memory(nn.Module):
         similarity_kv = compute_similarity(norm_emb, memory_keys_updated, metric=metric)
         similarity_vk = compute_similarity(norm_emb_glo, memory_values_updated, metric=metric)
 
+        similarity_kv = torch.where(torch.ge(similarity_kv, self.thresh), similarity_kv,
+                                    torch.zeros_like(similarity_kv).to(self.device))
+        similarity_kv = nn.functional.normalize(similarity_kv, p=1, dim=-1)
         embedding_global = norm_emb_glo + torch.sum(
             similarity_kv.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), -2)
         embedding_global = nn.functional.normalize(embedding_global, p=2, dim=-1)
@@ -194,8 +203,15 @@ class Memory(nn.Module):
         # 1. key->value
         score_max = torch.zeros(similarity_kv.shape).to(self.device). \
             scatter(-1, torch.argmax(similarity_kv, -1).unsqueeze(-1), 1.0)
-        select_global = torch.sum(score_max.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), 2)
-        loss_v = compute_loss(select_global, norm_emb_glo)
+        select_max = torch.sum(score_max.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), 2)
+
+        # score_min = torch.zeros(similarity_kv.shape).to(self.device). \
+        #     scatter(-1, torch.argmin(similarity_kv, -1).unsqueeze(-1), 1.0)
+        # select_min = torch.sum(score_min.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), 2)
+        loss_v = compute_loss(select_max, norm_emb_glo)
+        # loss_v = torch.max(
+        #     compute_loss(select_max, norm_emb_glo) - compute_loss(select_min, norm_emb_glo) + self.margin,
+        #     torch.tensor(0, dtype=torch.float).to(self.device))
 
         # 2. value->key
         score_max = torch.zeros(similarity_vk.shape).to(self.device).scatter(-1,
@@ -210,7 +226,7 @@ class Memory(nn.Module):
                            torch.tensor(0, dtype=torch.float).to(self.device))
         # 3. prototype loss
         # todo: Use prototype
-        return torch.cat([norm_emb, embedding_global], -1), loss_k, loss_v
+        return norm_emb, embedding_global, loss_k, loss_v
 
 
 class GNN(nn.Module):
@@ -218,7 +234,7 @@ class GNN(nn.Module):
     def __init__(self, cfg) -> None:
         super().__init__()
         self.cfg = cfg
-        self.in_channel = 2 * cfg.emb_size + cfg.n_way
+        self.in_channel = cfg.emb_size + cfg.n_way
         self.out_chanel = cfg.out_channel
         self.num_layers = cfg.num_layers
         self.cfg_device = cfg.device
@@ -237,15 +253,16 @@ class GNN(nn.Module):
                             UpdateNode(self.in_channel + i * self.out_chanel, out_channel=self.out_chanel))
 
         self.fc = nn.Sequential(
-            nn.Linear(self.in_channel + self.num_layers * self.out_chanel, self.cfg.n_way, bias=True),
+            nn.Linear(self.in_channel + self.num_layers * self.out_chanel + cfg.emb_size, self.cfg.n_way, bias=True),
             # nn.Linear(self.out_chanel, self.cfg.n_way, bias=True),
             # nn.Softmax(-1)
         )
 
-    def forward(self, embedding, labels):
+    def forward(self, embedding, global_embedding, labels):
         """
         Feed embedding to GNN
         :param embedding: embedding feature for images
+        :param global_embedding: global embedding feature for images
         :param labels: images label, one-hot
         :return: prediction
         """
@@ -265,7 +282,7 @@ class GNN(nn.Module):
             w = self._modules['w_{}'.format(i)](x, self.cfg.device)
             x = self._modules['l_{}'.format(i)](x, w)
         # pred = x[..., -self.out_chanel:]
-        pred = x
+        pred = torch.cat([x, global_embedding], -1)
         pred = self.fc(pred)
         pred_support = pred[:, :self.cfg.n_way * self.cfg.k_shot, :].reshape([-1, self.cfg.n_way])
         pred_query = pred[:, self.cfg.n_way * self.cfg.k_shot:, :].reshape([-1, self.cfg.n_way])

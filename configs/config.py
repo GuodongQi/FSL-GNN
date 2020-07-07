@@ -39,7 +39,7 @@ configs.add_argument('--backbone', type=str, default="ConvNet", help="ConvNet, R
 
 # memory setting
 configs.add_argument('--mem_size', type=int, default=15, help='memory size')
-configs.add_argument('--thresh', type=float, default=0.5, help='select which score')
+configs.add_argument('--thresh', type=float, default=0.3, help='select which score')
 configs.add_argument('--q_k', type=float, default=0.99, help='memory key update momentum')
 configs.add_argument('--q_v', type=float, default=0.999, help='memory value update momentum')
 configs.add_argument('--margin', type=float, default=2, help='cosine similarity margin')

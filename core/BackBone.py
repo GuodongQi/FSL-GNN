@@ -9,6 +9,7 @@ class ResNet12Block(nn.Module):
     """
     ResNet block
     """
+
     def __init__(self, inplanes, planes):
         super(ResNet12Block, self).__init__()
 
@@ -132,6 +133,7 @@ class ResNet12(nn.Module):
     """
     ResNet12 backbone
     """
+
     def __init__(self, emb_size, block=ResNet12Block, cifar_flag=False):
         super(ResNet12, self).__init__()
         cfg = [64, 128, 256, 512]
@@ -215,7 +217,7 @@ class ResNet18(nn.Module):
         self.layer4 = self._make_layer(block, cfg[2], cfg[3], layers[3])
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.maxpool = nn.MaxPool2d(2)
-        self.layer_second = nn.Sequential(nn.Linear(in_features=cfg[2]*5*5,
+        self.layer_second = nn.Sequential(nn.Linear(in_features=cfg[2] * 5 * 5,
                                                     out_features=self.emb_size,
                                                     bias=True),
                                           nn.BatchNorm1d(self.emb_size))
@@ -266,7 +268,7 @@ class WRN(nn.Module):
         super(WRN, self).__init__()
         cfg = [120, 240, 480]
         self.emb_size = emb_size
-        self.inplanes = iChannels = int(cfg[0]/2)
+        self.inplanes = iChannels = int(cfg[0] / 2)
         self.conv1 = nn.Conv2d(3, iChannels, kernel_size=3, stride=1, padding=1)
         self.bn1 = nn.BatchNorm2d(iChannels)
         self.relu = nn.ReLU(inplace=True)
@@ -275,12 +277,12 @@ class WRN(nn.Module):
         self.layer3 = self._make_layer(block, cfg[2], layers[2], stride=2)
         self.avgpool = nn.AdaptiveAvgPool2d(1)
         self.maxpool = nn.AdaptiveMaxPool2d(3)
-        self.layer_second = nn.Sequential(nn.Linear(in_features=cfg[1]*block.expansion*9,
+        self.layer_second = nn.Sequential(nn.Linear(in_features=cfg[1] * block.expansion * 9,
                                                     out_features=self.emb_size,
                                                     bias=True),
                                           nn.BatchNorm1d(self.emb_size))
 
-        self.layer_last = nn.Sequential(nn.Linear(in_features=cfg[2]*block.expansion,
+        self.layer_last = nn.Sequential(nn.Linear(in_features=cfg[2] * block.expansion,
                                                   out_features=self.emb_size,
                                                   bias=True),
                                         nn.BatchNorm1d(self.emb_size))
@@ -335,6 +337,7 @@ class ConvNet(nn.Module):
     """
     Conv4 backbone
     """
+
     def __init__(self, emb_size, cifar_flag=False):
         super(ConvNet, self).__init__()
         # set size
@@ -352,14 +355,14 @@ class ConvNet(nn.Module):
                                     nn.MaxPool2d(kernel_size=2),
                                     nn.LeakyReLU(negative_slope=0.2, inplace=True))
         self.conv_2 = nn.Sequential(nn.Conv2d(in_channels=self.hidden,
-                                              out_channels=int(self.hidden*1.5),
+                                              out_channels=int(self.hidden * 1.5),
                                               kernel_size=3,
                                               bias=False),
-                                    nn.BatchNorm2d(num_features=int(self.hidden*1.5)),
+                                    nn.BatchNorm2d(num_features=int(self.hidden * 1.5)),
                                     nn.MaxPool2d(kernel_size=2),
                                     nn.LeakyReLU(negative_slope=0.2, inplace=True))
-        self.conv_3 = nn.Sequential(nn.Conv2d(in_channels=int(self.hidden*1.5),
-                                              out_channels=self.hidden*2,
+        self.conv_3 = nn.Sequential(nn.Conv2d(in_channels=int(self.hidden * 1.5),
+                                              out_channels=self.hidden * 2,
                                               kernel_size=3,
                                               padding=1,
                                               bias=False),
@@ -368,11 +371,24 @@ class ConvNet(nn.Module):
                                     nn.LeakyReLU(negative_slope=0.2, inplace=True),
                                     nn.Dropout2d(0.4))
         self.max = nn.MaxPool2d(kernel_size=2)
-        self.layer_second = nn.Sequential(nn.Linear(in_features=self.last_hidden * 2,
-                                          out_features=self.emb_size, bias=True),
-                                          nn.BatchNorm1d(self.emb_size))
-        self.conv_4 = nn.Sequential(nn.Conv2d(in_channels=self.hidden*2,
-                                              out_channels=self.hidden*4,
+        self.conv_3_1 = nn.Sequential(nn.Conv2d(in_channels=int(self.hidden * 2),
+                                                out_channels=self.hidden * 2,
+                                                kernel_size=3,
+                                                padding=1,
+                                                bias=False),
+                                      nn.BatchNorm2d(num_features=self.hidden * 2),
+                                      nn.LeakyReLU(negative_slope=0.2, inplace=True),
+                                      nn.Dropout2d(0.4))
+
+        self.layer_second_a = nn.Sequential(nn.Linear(in_features=self.last_hidden * 2,
+                                                      out_features=self.last_hidden, bias=True),
+                                            nn.BatchNorm1d(self.last_hidden),
+                                            nn.LeakyReLU(negative_slope=0.2, inplace=True))
+        self.layer_second_b = nn.Sequential(nn.Linear(in_features=self.last_hidden,
+                                                      out_features=self.emb_size, bias=True),
+                                            nn.BatchNorm1d(self.emb_size))
+        self.conv_4 = nn.Sequential(nn.Conv2d(in_channels=self.hidden * 2,
+                                              out_channels=self.hidden * 4,
                                               kernel_size=3,
                                               padding=1,
                                               bias=False),
@@ -390,7 +406,8 @@ class ConvNet(nn.Module):
         out_3 = self.conv_3(out_2)
         output_data = self.conv_4(out_3)
         output_data0 = self.max(out_3)
+        output_data0 = self.conv_3_1(output_data0)
         out = []
         out.append(self.layer_last(output_data.view(output_data.size(0), -1)))
-        out.append(self.layer_second(output_data0.view(output_data0.size(0), -1)))
+        out.append(self.layer_second_b(self.layer_second_a(output_data0.view(output_data0.size(0), -1))))
         return out

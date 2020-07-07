@@ -188,8 +188,9 @@ def main():
             embedding, global_embedding = backbone(torch.cat([support_x, query_x], 0) / 255.0)
             support_embedding, query_embedding, support_y, query_y, sup_emb_glo, que_emb_glo = \
                 decompose_embedding_from_backbone(embedding, [support_y, query_y], global_embedding)
-            embedding, loss_k, loss_v = mem([support_embedding, query_embedding], [sup_emb_glo, que_emb_glo])
-            loss_cls, acc = gnn(embedding, [support_y, query_y])
+            embedding, global_embedding, loss_k, loss_v = mem([support_embedding, query_embedding],
+                                                              [sup_emb_glo, que_emb_glo])
+            loss_cls, acc = gnn(embedding, global_embedding, [support_y, query_y])
             loss = alpha * loss_v + beta * loss_k + gama * loss_cls
             # for visual images and labels
             '''
@@ -251,8 +252,9 @@ def main():
                 embedding, global_embedding = backbone(torch.cat([support_x, query_x], 0) / 255.0)
                 support_embedding, query_embedding, support_y, query_y, sup_emb_glo, que_emb_glo = \
                     decompose_embedding_from_backbone(embedding, [support_y, query_y], global_embedding)
-                embedding, loss_k, loss_v = mem([support_embedding, query_embedding], [sup_emb_glo, que_emb_glo])
-                loss_cls, acc = gnn(embedding, [support_y, query_y])
+                embedding, global_embedding, loss_k, loss_v = mem([support_embedding, query_embedding],
+                                                                  [sup_emb_glo, que_emb_glo])
+                loss_cls, acc = gnn(embedding, global_embedding, [support_y, query_y])
                 loss = alpha * loss_v + beta * loss_k + gama * loss_cls
 
             valid_loss_item = loss.item()
