@@ -2,7 +2,7 @@ import torch.nn as nn
 import torch
 
 from core.BackBone import ConvNet
-from core.utils import compute_similarity, compute_loss
+from core.utils import compute_similarity, compute_loss, find_idx
 
 
 class CalWeights(nn.Module):
@@ -133,19 +133,20 @@ class Memory(nn.Module):
         self.second_size = self.cfg.emb_size
         # memory setting
         self.mem_size = self.cfg.mem_size
-        self.thresh = self.cfg.thresh
+        self.thresh_kv = [0.45, 0.3]
+        self.thresh_vk = [0.45, 0.3]
         self.q_v = self.cfg.q_v
         self.q_k = self.cfg.q_k
         self.margin = self.cfg.margin
 
         # memory blocks/slots
         self.memory_keys = nn.Parameter(
-            pow(1 / self.emb_size, 0.5) * torch.rand(self.mem_size, self.emb_size, dtype=torch.float).to(self.device),
-            requires_grad=True)
+            torch.rand(self.mem_size, self.emb_size, dtype=torch.float).to(self.device), requires_grad=False)
         self.memory_values = nn.Parameter(
-            pow(1 / self.emb_size, 0.5) * torch.rand(self.mem_size, self.second_size, dtype=torch.float).to(
-                self.device),
-            requires_grad=True)
+            torch.rand(self.mem_size, self.second_size, dtype=torch.float).to(self.device), requires_grad=False)
+
+        self.memory_keys.data = nn.functional.normalize(self.memory_keys, p=2, dim=-1)
+        self.memory_values.data = nn.functional.normalize(self.memory_values, p=2, dim=-1)
 
     def forward(self, embedding, embedding_global, metric="Cosine"):
         """
@@ -162,69 +163,67 @@ class Memory(nn.Module):
         # for key->value, generate reasonable global embedding
         # 1. calculate distance and score between memory_key and embedding
         similarity_kv = compute_similarity(norm_emb, self.memory_keys, metric=metric)
-        # 2. We update global value of memory, where similarity_kv greater than threshold.
-        score = torch.where(torch.ge(similarity_kv, self.thresh), similarity_kv,
-                            torch.zeros_like(similarity_kv).to(self.device))  # [t_task, n_way*k_shot]
-        score = nn.functional.normalize(score, p=1, dim=-1)
+        # 2. We find maximal negative and minimal positive score index
+        min_pos, max_neg, pos_score, pos_s, neg_s = find_idx(similarity_kv, self.thresh_kv, self.device)
+        # 3. calculate loss_v
+        min_pos_vec = torch.gather(
+            self.memory_values.unsqueeze(0).unsqueeze(0).expand(min_pos.size(0), min_pos.size(1), -1, -1), dim=2,
+            index=min_pos.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.memory_values.size(-1))).squeeze(2)
+        max_neg_vec = torch.gather(
+            self.memory_values.unsqueeze(0).unsqueeze(0).expand(max_neg.size(0), max_neg.size(1), -1, -1), dim=2,
+            index=max_neg.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.memory_values.size(-1))).squeeze(2)
+
+        loss_v = torch.max(
+            (pos_s * compute_loss(min_pos_vec, norm_emb_glo) - neg_s * compute_loss(max_neg_vec, norm_emb_glo)).mean()
+            + self.margin, torch.tensor(0, dtype=torch.float).to(self.device))
+        # 4 update memory_values
+        # normalization
+        pos_score_norm = nn.functional.normalize(pos_score, p=1, dim=-1).unsqueeze(-1)
+        # update values
         memory_values_updated = nn.functional.normalize(
-            torch.mean(
-                self.q_v * self.memory_values + (1 - self.q_v) * score.unsqueeze(-1) * norm_emb_glo.unsqueeze(-2),
-                [0, 1]), p=2, dim=-1)
+            torch.mean(nn.functional.normalize(
+                (1 - pos_score_norm * (1-self.q_v)) * self.memory_values + pos_score_norm * self.q_v * norm_emb_glo
+                .unsqueeze(-2), p=2, dim=-1), [0, 1]), p=2, dim=-1)
 
         # for value->key
-        # 3. calculate distance and score between memory_key and embedding
+        # 1. calculate distance and score between memory_key and embedding
         similarity_vk = compute_similarity(norm_emb_glo, self.memory_values, metric=metric)
-        # 4. find max similarity_vk, update the corresponding keys with support embedding
-        # score = torch.zeros(similarity_vk.shape).to(self.device).scatter(-1, torch.argmax(similarity_vk, -1).
-        #                                                                  unsqueeze(-1), 1.0)
-        score = torch.where(torch.ge(similarity_vk, self.thresh), similarity_vk,
-                            torch.zeros_like(similarity_vk).to(self.device))  # [t_task, n_way*k_shot]
-        score = nn.functional.normalize(score, p=1, dim=-1)
+        # 2. We find maximal negative and minimal positive score index
+        min_pos, max_neg, pos_score_k, pos_s, neg_s = find_idx(similarity_vk, self.thresh_vk, self.device)
+        # 3. calculate loss_k
+        min_pos_vec = torch.gather(
+            self.memory_keys.unsqueeze(0).unsqueeze(0).expand(min_pos.size(0), min_pos.size(1), -1, -1), dim=2,
+            index=min_pos.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.memory_keys.size(-1))).squeeze(2)
+        max_neg_vec = torch.gather(
+            self.memory_keys.unsqueeze(0).unsqueeze(0).expand(max_neg.size(0), max_neg.size(1), -1, -1), dim=2,
+            index=max_neg.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.memory_keys.size(-1))).squeeze(2)
+
+        loss_k = torch.max(
+            (pos_s * compute_loss(min_pos_vec, norm_emb) - neg_s * compute_loss(max_neg_vec, norm_emb)).mean()
+            + self.margin, torch.tensor(0, dtype=torch.float).to(self.device))
+
+        # 4 update memory_key
+        # normalization
+        pos_score_onehot = torch.zeros(pos_score_k.shape).to(self.device). \
+            scatter(-1, torch.argmax(pos_score_k, -1).unsqueeze(-1), 1.0)
+        pos_score_k = pos_score_onehot * pos_score_k
+        pos_score_k = torch.where(pos_score_k > 0.6, torch.ones_like(pos_score_k, device=self.device),
+                                  torch.zeros_like(pos_score_k, device=self.device)).unsqueeze(-1)
+        # update key
         memory_keys_updated = nn.functional.normalize(
-            torch.mean(self.q_k * self.memory_keys + (1 - self.q_k) * score.unsqueeze(-1) * norm_emb.unsqueeze(-2),
-                       [0, 1]), p=2, dim=-1)
+            torch.mean(nn.functional.normalize(
+                (1 - pos_score_k * self.q_k) * self.memory_keys + pos_score_k * self.q_k * norm_emb.unsqueeze(-2),
+                p=2, dim=-1), [0, 1]), p=2, dim=-1)
 
-        # # apply update memory
-        # self.memory_keys.data = memory_keys_updated
-        # self.memory_values.data = memory_values_updated
-
-        # 5. based on updated memory, select global features for each example
-        similarity_kv = compute_similarity(norm_emb, memory_keys_updated, metric=metric)
-        similarity_vk = compute_similarity(norm_emb_glo, memory_values_updated, metric=metric)
-
-        similarity_kv = torch.where(torch.ge(similarity_kv, self.thresh), similarity_kv,
-                                    torch.zeros_like(similarity_kv).to(self.device))
-        similarity_kv = nn.functional.normalize(similarity_kv, p=1, dim=-1)
         embedding_global = norm_emb_glo + torch.sum(
-            similarity_kv.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), -2)
+            pos_score.unsqueeze(-1) * self.memory_values.unsqueeze(0).unsqueeze(0), -2)
         embedding_global = nn.functional.normalize(embedding_global, p=2, dim=-1)
+        # 5. based on updated memory, select global features for each example
+        # # apply update memory
+        self.memory_keys.data = memory_keys_updated
+        self.memory_values.data = memory_values_updated
 
-        # Calculate loss with self-supervised
-        # 1. key->value
-        score_max = torch.zeros(similarity_kv.shape).to(self.device). \
-            scatter(-1, torch.argmax(similarity_kv, -1).unsqueeze(-1), 1.0)
-        select_max = torch.sum(score_max.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), 2)
-
-        # score_min = torch.zeros(similarity_kv.shape).to(self.device). \
-        #     scatter(-1, torch.argmin(similarity_kv, -1).unsqueeze(-1), 1.0)
-        # select_min = torch.sum(score_min.unsqueeze(-1) * memory_values_updated.unsqueeze(0).unsqueeze(0), 2)
-        loss_v = compute_loss(select_max, norm_emb_glo)
-        # loss_v = torch.max(
-        #     compute_loss(select_max, norm_emb_glo) - compute_loss(select_min, norm_emb_glo) + self.margin,
-        #     torch.tensor(0, dtype=torch.float).to(self.device))
-
-        # 2. value->key
-        score_max = torch.zeros(similarity_vk.shape).to(self.device).scatter(-1,
-                                                                             torch.argmax(similarity_vk, -1).unsqueeze(
-                                                                                 -1), 1.0)
-        score_min = torch.zeros(similarity_vk.shape).to(self.device).scatter(-1,
-                                                                             torch.argmin(similarity_vk, -1).unsqueeze(
-                                                                                 -1), 1.0)
-        select_max = torch.sum(score_max.unsqueeze(-1) * memory_keys_updated.unsqueeze(0).unsqueeze(0), 2)
-        select_min = torch.sum(score_min.unsqueeze(-1) * memory_keys_updated.unsqueeze(0).unsqueeze(0), 2)
-        loss_k = torch.max(compute_loss(select_max, norm_emb) - compute_loss(select_min, norm_emb) + self.margin,
-                           torch.tensor(0, dtype=torch.float).to(self.device))
-        # 3. prototype loss
+        # prototype loss
         # todo: Use prototype
         return norm_emb, embedding_global, loss_k, loss_v
 

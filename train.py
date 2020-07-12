@@ -23,7 +23,7 @@ configs.device = torch.device('cuda') if torch.cuda.is_available() else torch.de
 #     configs.use_dali = True
 #  torch.backends.cudnn.benchmark = True
 torch.autograd.set_detect_anomaly(True)
-torch.set_num_threads(1)
+torch.set_num_threads(4)
 
 
 def build_net():
@@ -90,9 +90,9 @@ def decompose_embedding_from_backbone(embedding, labels, embedding_global=None):
 
 
 def main():
-    alpha = configs.alpha
-    beta = configs.beta
-    gama = configs.gama
+    alpha = configs.v_loss_rate
+    beta = configs.k_loss_rate
+    gama = configs.cls_loss_rate
     # for exp
     for_exp = True
 
@@ -141,7 +141,7 @@ def main():
     elif configs.lr_policy == 'exp':
         scheduler = ExponentialLR(optimizer, gamma=configs.lr_gamma)
     elif configs.lr_policy == 'plateau':
-        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=configs.lr_gama, patience=40, verbose=True)
+        scheduler = ReduceLROnPlateau(optimizer, mode="min", factor=configs.lr_gama, patience=80, verbose=True)
     else:
         raise Exception('error lr decay policy')
 

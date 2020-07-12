@@ -42,12 +42,12 @@ configs.add_argument('--mem_size', type=int, default=15, help='memory size')
 configs.add_argument('--thresh', type=float, default=0.3, help='select which score')
 configs.add_argument('--q_k', type=float, default=0.99, help='memory key update momentum')
 configs.add_argument('--q_v', type=float, default=0.999, help='memory value update momentum')
-configs.add_argument('--margin', type=float, default=2, help='cosine similarity margin')
+configs.add_argument('--margin', type=float, default=1, help='cosine similarity margin')
 
 # loss weights
-configs.add_argument('--alpha', type=float, default=1, help='loss value ratio')
-configs.add_argument('--beta', type=float, default=1, help='loss key ration')
-configs.add_argument('--gama', type=float, default=1, help='loss class ratio')
+configs.add_argument('--v_loss_rate', type=float, default=0.1, help='loss value ratio')
+configs.add_argument('--k_loss_rate', type=float, default=0.1, help='loss key ration')
+configs.add_argument('--cls_loss_rate', type=float, default=1, help='loss class ratio')
 
 
 # network setting
