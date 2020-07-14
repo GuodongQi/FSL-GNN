@@ -233,7 +233,6 @@ def main():
             loss_print["train_loss_k"].append(train_loss_k)
             loss_print["train_loss_v"].append(train_loss_v)
             loss_print["train_acc"].append(train_acc_item)
-            loss_print["simil"].append(train_acc_item)
 
             optimizer.zero_grad()
             loss.backward()
