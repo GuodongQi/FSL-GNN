@@ -2,10 +2,10 @@ import torch
 
 
 def compute_loss(x1, x2):
-    return 1 - torch.sum(x1 * x2, -1)
+    return torch.sum(x1 * x2, -1)
 
 
-def find_idx(similarity, thresh, device):
+def find_idx_old(similarity, thresh, device):
     """return minimal positive and maximal negative similarity score index"""
     thresh_pos, thresh_neg = thresh
     pos = torch.where(torch.ge(similarity, thresh_pos), similarity, 2 * torch.ones_like(similarity).to(device))
@@ -23,6 +23,26 @@ def find_idx(similarity, thresh, device):
                             torch.zeros_like(neg_score).to(device))
 
     return min_pos_idx, max_neg_idx, pos, pos_score, neg_score
+
+
+def find_idx(similarity, thresh, device):
+    """return max positive and minimal negative similarity score index"""
+    thresh_pos, thresh_neg = thresh
+    pos = torch.where(torch.ge(similarity, thresh_pos), similarity,torch.zeros_like(similarity).to(device))
+    max_pos_idx = torch.argmax(pos, -1)
+    neg = torch.where(torch.lt(similarity, thresh_neg), similarity, torch.ones_like(similarity).to(device))
+    min_neg_idx = torch.argmin(neg, -1)
+
+    # some query vector may not has positive memory slot, we dont calculate its loss
+    pos_score = torch.gather(pos, dim=-1, index=max_pos_idx.unsqueeze(-1)).squeeze(-1)
+    pos_score = torch.where(pos_score >= thresh_pos, torch.ones_like(pos_score).to(device),
+                            torch.zeros_like(pos_score).to(device))
+
+    neg_score = torch.gather(neg, dim=-1, index=min_neg_idx.unsqueeze(-1)).squeeze(-1)
+    neg_score = torch.where(neg_score < thresh_neg, torch.ones_like(neg_score).to(device),
+                            torch.zeros_like(neg_score).to(device))
+
+    return max_pos_idx, min_neg_idx, pos, pos_score, neg_score
 
 
 def compute_similarity(x1, x2, metric="Euclidean"):

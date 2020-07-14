@@ -148,15 +148,19 @@ class Memory(nn.Module):
         self.memory_keys.data = nn.functional.normalize(self.memory_keys, p=2, dim=-1)
         self.memory_values.data = nn.functional.normalize(self.memory_values, p=2, dim=-1)
 
-    def forward(self, embedding, embedding_global, metric="Cosine"):
+    def forward(self, embedding, embedding_global, thresh, metric="Cosine"):
         """
         Given embedding input, we update keys and value with embedding and global_embedding
         used to weight sum to last layer embedding
         :param embedding: [t_task, n_way*k_shot, edm_size] +  [t_task, n_way*k_query, edm_size]
         :param embedding_global: [t_task, n_way*k_shot, edm_size] +  [t_task, n_way*k_query, edm_size]
+        :param thresh: thresh_kv_pos, thresh_kv_neg, thresh_vk_pos, thresh_vk_neg
         :param metric: Euclidean distance or cosine distance
         :return: a robust memory and weighted sum embedding
         """
+        self.thresh_kv = [thresh[0], thresh[1]]
+        self.thresh_vk = [thresh[2], thresh[3]]
+
         norm_emb = nn.functional.normalize(torch.cat(embedding, 1), p=2, dim=-1)
         norm_emb_glo = nn.functional.normalize(torch.cat(embedding_global, 1), p=2, dim=-1)
 
@@ -174,7 +178,7 @@ class Memory(nn.Module):
             index=max_neg.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.memory_values.size(-1))).squeeze(2)
 
         loss_v = torch.max(
-            (pos_s * compute_loss(min_pos_vec, norm_emb_glo) - neg_s * compute_loss(max_neg_vec, norm_emb_glo)).mean()
+            -(pos_s * compute_loss(min_pos_vec, norm_emb_glo) + neg_s * compute_loss(max_neg_vec, norm_emb_glo)).mean()
             + self.margin, torch.tensor(0, dtype=torch.float).to(self.device))
         # 4 update memory_values
         # normalization
@@ -182,7 +186,8 @@ class Memory(nn.Module):
         # update values
         memory_values_updated = nn.functional.normalize(
             torch.mean(nn.functional.normalize(
-                (1 - pos_score_norm * (1-self.q_v)) * self.memory_values + pos_score_norm * self.q_v * norm_emb_glo
+                (1 - pos_score_norm * (1 - self.q_v)) * self.memory_values + pos_score_norm * (
+                            1 - self.q_v) * norm_emb_glo
                 .unsqueeze(-2), p=2, dim=-1), [0, 1]), p=2, dim=-1)
 
         # for value->key
@@ -199,7 +204,7 @@ class Memory(nn.Module):
             index=max_neg.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, -1, self.memory_keys.size(-1))).squeeze(2)
 
         loss_k = torch.max(
-            (pos_s * compute_loss(min_pos_vec, norm_emb) - neg_s * compute_loss(max_neg_vec, norm_emb)).mean()
+            -(pos_s * compute_loss(min_pos_vec, norm_emb) + neg_s * compute_loss(max_neg_vec, norm_emb)).mean()
             + self.margin, torch.tensor(0, dtype=torch.float).to(self.device))
 
         # 4 update memory_key
@@ -207,12 +212,14 @@ class Memory(nn.Module):
         pos_score_onehot = torch.zeros(pos_score_k.shape).to(self.device). \
             scatter(-1, torch.argmax(pos_score_k, -1).unsqueeze(-1), 1.0)
         pos_score_k = pos_score_onehot * pos_score_k
-        pos_score_k = torch.where(pos_score_k > 0.6, torch.ones_like(pos_score_k, device=self.device),
+        pos_score_k = torch.where(pos_score_k > 0, torch.ones_like(pos_score_k, device=self.device),
                                   torch.zeros_like(pos_score_k, device=self.device)).unsqueeze(-1)
+
         # update key
         memory_keys_updated = nn.functional.normalize(
             torch.mean(nn.functional.normalize(
-                (1 - pos_score_k * self.q_k) * self.memory_keys + pos_score_k * self.q_k * norm_emb.unsqueeze(-2),
+                (1 - pos_score_k * (1 - self.q_k)) * self.memory_keys + pos_score_k * (
+                            1 - self.q_k) * norm_emb.unsqueeze(-2),
                 p=2, dim=-1), [0, 1]), p=2, dim=-1)
 
         embedding_global = norm_emb_glo + torch.sum(
@@ -223,9 +230,13 @@ class Memory(nn.Module):
         self.memory_keys.data = memory_keys_updated
         self.memory_values.data = memory_values_updated
 
+        # similarity loss:
+        mse = nn.MSELoss()
+        loss_s = mse(similarity_vk, similarity_kv)
+
         # prototype loss
         # todo: Use prototype
-        return norm_emb, embedding_global, loss_k, loss_v
+        return norm_emb, embedding_global, loss_k, loss_v, loss_s
 
 
 class GNN(nn.Module):

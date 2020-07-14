@@ -1,6 +1,7 @@
 import os
 import time
 
+from math import exp
 import numpy as np
 import platform
 import torch
@@ -13,6 +14,7 @@ from configs.config import my_configs as configs
 from core.BackBone import ConvNet, ResNet12, ResNet18, WRN
 from core.GNN import GNN, Memory
 from datasets.data_loader import data_loader
+from collections import defaultdict
 
 # train on the GPU or on the CPU, if a GPU is not available
 from datasets.data_utils import shuffle, show_images
@@ -163,10 +165,13 @@ def main():
     writer = SummaryWriter(os.path.join(save_path, "logs", "%s" % time.strftime('%Y-%m-%d-%H-%M')))
 
     for ep in range(configs.start_epoch, configs.epochs):
-        loss_tr = []
-        acc_tr = []
-        loss_val = []
-        acc_val = []
+        margin = 2
+
+        thresh_train = [1 * (1 / (1 + exp(-ep / 100 + margin))), 1 - (1 / (1 + exp(-ep / 100 + margin))),
+                        1 * (1 / (1 + exp(-ep / 100 + margin))), 1 - (1 / (1 + exp(-ep / 100 + margin))), ]
+        print("epoch:", ep, "thresh_train:", thresh_train)
+        loss_print = defaultdict(list)
+
         train_loss_item = 0
         train_acc_item = 0
         train_loss_k = 0
@@ -188,10 +193,10 @@ def main():
             embedding, global_embedding = backbone(torch.cat([support_x, query_x], 0) / 255.0)
             support_embedding, query_embedding, support_y, query_y, sup_emb_glo, que_emb_glo = \
                 decompose_embedding_from_backbone(embedding, [support_y, query_y], global_embedding)
-            embedding, global_embedding, loss_k, loss_v = mem([support_embedding, query_embedding],
-                                                              [sup_emb_glo, que_emb_glo])
+            embedding, global_embedding, loss_k, loss_v, loss_s = mem([support_embedding, query_embedding],
+                                                              [sup_emb_glo, que_emb_glo], thresh_train)
             loss_cls, acc = gnn(embedding, global_embedding, [support_y, query_y])
-            loss = alpha * loss_v + beta * loss_k + gama * loss_cls
+            loss = alpha * loss_v + beta * loss_k + gama * loss_cls + loss_s
             # for visual images and labels
             '''
             imgs = torch.cat([support_x, query_x], 0)
@@ -219,12 +224,16 @@ def main():
             '''
 
             train_loss_item = loss.item()
-            train_loss_c = loss_cls.item()
+            train_acc_item = acc.item()
+            train_loss_c = loss_cls.item() * gama
             train_loss_k = loss_k.item() * alpha
             train_loss_v = loss_v.item() * beta
-            train_acc_item = acc.item() * gama
-            loss_tr.append(train_loss_item)
-            acc_tr.append(train_acc_item)
+            loss_print["train_loss"].append(train_loss_item)
+            loss_print["train_loss_c"].append(train_loss_c)
+            loss_print["train_loss_k"].append(train_loss_k)
+            loss_print["train_loss_v"].append(train_loss_v)
+            loss_print["train_acc"].append(train_acc_item)
+            loss_print["simil"].append(train_acc_item)
 
             optimizer.zero_grad()
             loss.backward()
@@ -252,39 +261,43 @@ def main():
                 embedding, global_embedding = backbone(torch.cat([support_x, query_x], 0) / 255.0)
                 support_embedding, query_embedding, support_y, query_y, sup_emb_glo, que_emb_glo = \
                     decompose_embedding_from_backbone(embedding, [support_y, query_y], global_embedding)
-                embedding, global_embedding, loss_k, loss_v = mem([support_embedding, query_embedding],
-                                                                  [sup_emb_glo, que_emb_glo])
+                embedding, global_embedding, loss_k, loss_v, loss_s = mem([support_embedding, query_embedding],
+                                                                  [sup_emb_glo, que_emb_glo], thresh_train)
                 loss_cls, acc = gnn(embedding, global_embedding, [support_y, query_y])
-                loss = alpha * loss_v + beta * loss_k + gama * loss_cls
+                loss = alpha * loss_v + beta * loss_k + gama * loss_cls + loss_s
 
             valid_loss_item = loss.item()
             valid_acc_item = acc.item()
             valid_loss_c = loss_cls.item() * gama
             valid_loss_k = loss_k.item() * alpha
             valid_loss_v = loss_v.item() * beta
-            loss_val.append(valid_loss_item)
-            acc_val.append(valid_acc_item)
+            loss_print["valid_loss"].append(train_loss_item)
+            loss_print["valid_loss_c"].append(valid_loss_c)
+            loss_print["valid_loss_k"].append(valid_loss_k)
+            loss_print["valid_loss_v"].append(valid_loss_v)
+            loss_print["valid_acc"].append(valid_acc_item)
 
-        scheduler.step(np.mean(loss_val))
-        print('epoch:{}, loss_tr:{:.5f}, acc_tr:{:.5f}, loss_val:{:.5f}, acc_val:{:.5f}, lr:{:.6f}'
-              .format(ep, np.mean(loss_tr), np.mean(acc_tr), np.mean(loss_val), np.mean(acc_val),
-                      optimizer.param_groups[0]['lr']))
+        scheduler.step(np.mean(loss_print["valid_loss"]))
+        print('epoch:{}, lr:{:.6f}'.format(ep, optimizer.param_groups[0]['lr']))
+        print(["{}:{:.6f}".format(key, np.mean(loss_print[key])) for key in loss_print.keys()])
 
         # tensorboard
         # writer.add_graph(net, (inputs,))
-        writer.add_scalar('Loss/train', np.mean(loss_tr), ep)
-        writer.add_scalar('Loss/val', np.mean(loss_val), ep)
-        writer.add_scalar('Accuracy/train', np.mean(acc_tr), ep)
-        writer.add_scalar('Accuracy/val', np.mean(acc_val), ep)
+        for key in loss_print.keys():
+            writer.add_scalar(key, np.mean(loss_print[key]), ep)
+        writer.add_scalar('Loss/train', np.mean(loss_print["train_loss"]), ep)
+        writer.add_scalar('Loss/val', np.mean(loss_print["valid_loss"]), ep)
+        writer.add_scalar('Accuracy/train', np.mean(loss_print["train_acc"]), ep)
+        writer.add_scalar('Accuracy/val', np.mean(loss_print["valid_acc"]), ep)
         writer.add_scalar('lr', optimizer.param_groups[0]['lr'], ep)
 
         # Model Save and Stop Criterion
-        cond1 = (np.mean(acc_val) > best_acc)
-        cond2 = (np.mean(loss_val) < best_loss)
+        cond1 = (np.mean( loss_print["valid_acc"]) > best_acc)
+        cond2 = (np.mean( loss_print["valid_loss"]) < best_loss)
 
         if cond1 or cond2:
-            best_acc = np.mean(acc_val)
-            best_loss = np.mean(loss_val)
+            best_acc = np.mean(loss_print["valid_acc"])
+            best_loss = np.mean(loss_print["valid_loss"])
             print('best val loss:{:.5f}, acc:{:.5f}'.format(best_loss, best_acc))
 
             # save model
